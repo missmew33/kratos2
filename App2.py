@@ -1,0 +1,370 @@
+ANT: These variables are provided by the Canvas environment.
+# Since this application focuses on data processing, they are not strictly used
+# but are included here for compliance with the runtime environment structure.
+# const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+# const firebaseConfig = JSON.parse(__firebase_config);
+# const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+
+# --- Configuration and Resource Caching ---
+
+# Set Streamlit page configuration for a professional look
+st.set_page_config(
+    page_title="Scientometric Production App",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Publication-ready Plotly configuration
+PLOTLY_TEMPLATE = "plotly_white"
+PUBLICATION_FONT = "Inter, sans-serif"
+COLOR_PALETTE = px.colors.qualitative.Plotly  # Accessible default palette
+
+@st.cache_resource
+def load_external_libraries():
+    """Caches the instantiation of external, heavy libraries (models/resources)."""
+    try:
+        import gender_guesser.detector as gender
+        import country_converter as coco
+        guesser = gender.Detector(case_sensitive=False)
+        # Initialize country converter with standard output for consistency
+        cc = coco.CountryConverter()
+        return guesser, cc
+    except ImportError as e:
+        st.error(f"Missing required library: {e}. Please check requirements.txt.")
+        return None, None
+
+guesser, cc = load_external_libraries()
+
+
+# --- Core Data Loading and Robustness ---
+
+@st.cache_data(show_spinner="Attempting robust CSV data load...")
+def load_data(uploaded_file):
+    """
+    Robustly loads a CSV file by trying common separators and encodings.
+    
+    Args:
+        uploaded_file (st.runtime.uploaded_file_manager.UploadedFile): The file object.
+        
+    Returns:
+        pd.DataFrame or None: The loaded DataFrame, or None on failure.
+    """
+    if uploaded_file is None:
+        return None
+        
+    content = uploaded_file.getvalue().decode('utf-8', errors='ignore')
+    
+    # Heuristics for common delimiters and encodings
+    separators = [',', ';', '\t', '|']
+    encodings = ['utf-8', 'latin-1', 'iso-8859-1']
+
+    for encoding in encodings:
+        for sep in separators:
+            try:
+                # Read file content as a string, then use StringIO to treat it like a file
+                df = pd.read_csv(StringIO(content), sep=sep, encoding=encoding, engine='python')
+                
+                # Simple check for successful parsing (e.g., more than one column)
+                if df.shape[1] > 1:
+                    st.success(f"File loaded successfully using separator: '{sep}' and encoding: '{encoding}'.")
+                    return df
+            except Exception:
+                continue # Try next combination
+
+    st.error("Failed to load CSV. Please check the file format, encoding, or ensure it contains data.")
+    return None
+
+# --- Data Processing and Scientometric Calculations ---
+
+@st.cache_data(show_spinner="Processing data and inferring attributes...")
+def process_data(df: pd.DataFrame, guesser, cc) -> pd.DataFrame:
+    """
+    Performs data cleaning, feature engineering, and attribute inference.
+    
+    Assumes 'Author Full Name' and 'Country' columns exist for demonstration.
+    
+    Args:
+        df (pd.DataFrame): The raw input DataFrame.
+        guesser: The gender-guesser detector instance.
+        cc: The country-converter instance.
+        
+    Returns:
+        pd.DataFrame: The processed DataFrame with inferred attributes.
+    """
+    processed_df = df.copy()
+    
+    # 1. Gender Inference (Requires 'Author Full Name' or similar)
+    if 'Author Full Name' in processed_df.columns:
+        processed_df['first_name'] = processed_df['Author Full Name'].astype(str).str.split().str[0]
+        
+        # Apply gender inference. Detector returns 'male', 'female', 'mostly_male', etc.
+        # We simplify to 'Male', 'Female', 'Unknown/Other'.
+        def infer_gender(name):
+            if pd.isna(name):
+                return 'Unknown/Other'
+            gender_result = guesser.get_gender(name.lower())
+            if 'male' in gender_result:
+                return 'Male'
+            elif 'female' in gender_result:
+                return 'Female'
+            else:
+                return 'Unknown/Other'
+                
+        processed_df['Inferred Gender'] = processed_df['first_name'].apply(infer_gender)
+        
+    # 2. Country Standardization (Requires 'Country' or similar)
+    if 'Country' in processed_df.columns:
+        # Standardize country names to ISO3 for consistency
+        processed_df['Standard Country'] = processed_df['Country'].apply(
+            lambda x: cc.convert(names=x, to='ISO3', not_found='Unknown') if pd.notna(x) else 'Unknown'
+        )
+        
+    return processed_df
+
+def calculate_scientometric_indices(df: pd.DataFrame) -> dict:
+    """
+    Calculates key scientometric indices (KCDI, KJI) for academic rigor.
+    
+    Note: The exact formulas for KCDI and KJI are illustrative here,
+    based on common scientometric principles (Diversity, Justice).
+    
+    Args:
+        df (pd.DataFrame): The processed DataFrame.
+        
+    Returns:
+        dict: A dictionary containing the calculated indices and components.
+    """
+    metrics = {}
+    
+    if 'Standard Country' in df.columns:
+        country_counts = df['Standard Country'].value_counts()
+        N = country_counts.sum()
+        C = len(country_counts) # Number of distinct countries
+        
+        # --- K-Index of Collaboration Diversity (KCDI) ---
+        # Based on Herfindahl-Hirschman Index (HHI) or similar concentration measures.
+        # A high KCDI indicates low concentration (high diversity).
+        # HHI: Sum of squared proportional shares (s_i^2). Max(HHI) is 1.
+        # KCDI = 1 - HHI (normalized diversity index)
+        if N > 0:
+            proportions = country_counts / N
+            hhi = (proportions ** 2).sum()
+            kcdi = 1 - hhi
+            
+            metrics['KCDI'] = kcdi
+            metrics['KCDI_Description'] = (
+                f"KCDI (Collaboration Diversity): {kcdi:.4f}. "
+                "Calculated as 1 - Herfindahl-Hirschman Index (HHI) on standardized country affiliations. "
+                "Value closer to 1.0 indicates higher collaboration diversity (less concentration)."
+            )
+        
+    if 'Inferred Gender' in df.columns:
+        gender_counts = df[df['Inferred Gender'].isin(['Male', 'Female'])]['Inferred Gender'].value_counts()
+        M = gender_counts.get('Male', 0)
+        F = gender_counts.get('Female', 0)
+        Total = M + F
+        
+        # --- K-Index of Gender Justice/Parity (KJI) ---
+        # A simple parity ratio, where 1.0 is perfect 50/50 balance.
+        if Total > 0:
+            P_male = M / Total
+            P_female = F / Total
+            
+            # Formula: 1 - |P_male - P_female|. This results in 1.0 for perfect parity (0.5-0.5) and 0.0 for extreme imbalance (1.0-0.0 or 0.0-1.0).
+            kji = 1 - abs(P_male - P_female)
+            
+            metrics['KJI'] = kji
+            metrics['KJI_Description'] = (
+                f"KJI (Gender Justice Index): {kji:.4f}. "
+                "Calculated as 1 - |%Male - %Female| for inferable authors. "
+                "Value closer to 1.0 indicates closer gender parity (justice)."
+            )
+            metrics['Gender_Parity_Ratio'] = f"{F / Total * 100:.1f}% Female vs. {M / Total * 100:.1f}% Male"
+
+    return metrics
+
+# --- Visualization Functions (Plotly Publication-Ready) ---
+
+def create_gender_bar_chart(df: pd.DataFrame) -> go.Figure:
+    """Creates a publication-ready bar chart for inferred gender distribution."""
+    
+    gender_counts = df['Inferred Gender'].value_counts().reset_index()
+    gender_counts.columns = ['Gender', 'Count']
+    gender_counts['Percentage'] = (gender_counts['Count'] / gender_counts['Count'].sum() * 100).round(1)
+
+    fig = px.bar(
+        gender_counts, 
+        x='Gender', 
+        y='Percentage', 
+        text='Percentage',
+        title='Distribution of Inferred Author Gender',
+        color='Gender',
+        color_discrete_sequence=[COLOR_PALETTE[0], COLOR_PALETTE[1], COLOR_PALETTE[3]] # Custom, accessible colors
+    )
+    
+    # Publication-ready styling
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE,
+        font=dict(family=PUBLICATION_FONT),
+        xaxis_title="Inferred Gender Category",
+        yaxis_title="Percentage of Authors (%)",
+        hovermode="x unified",
+        title_x=0.5, # Center title
+        showlegend=False
+    )
+    
+    # Customize bars
+    fig.update_traces(
+        texttemplate='%{y:.1f}%', 
+        textposition='outside',
+        marker_line_width=1.5, # Small border for clean look
+        marker_line_color='black',
+        hovertemplate="<b>%{x}</b><br>Count: %{customdata[0]}<br>Percentage: %{y:.1f}%<extra></extra>",
+        customdata=gender_counts[['Count']].values # Add count to custom data for tooltips
+    )
+    fig.update_yaxes(range=[0, gender_counts['Percentage'].max() * 1.1]) # Ensure text fits
+    return fig
+
+def create_country_treemap(df: pd.DataFrame) -> go.Figure:
+    """Creates an interactive treemap for author country contribution."""
+    
+    country_counts = df['Standard Country'].value_counts().reset_index()
+    country_counts.columns = ['Country', 'Count']
+    # Filter out 'Unknown' for visualization clarity, but keep total for context
+    country_viz = country_counts[country_counts['Country'] != 'Unknown'].head(20)
+
+    fig = px.treemap(
+        country_viz,
+        path=['Country'],
+        values='Count',
+        title='Top 20 Author Country Affiliations (Standardized)',
+        color='Count',
+        color_continuous_scale='Sunsetdark' # A professional, sequential color scale
+    )
+    
+    # Publication-ready styling
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE,
+        font=dict(family=PUBLICATION_FONT),
+        title_x=0.5,
+        margin=dict(t=50, l=10, r=10, b=10)
+    )
+    
+    fig.update_traces(
+        hovertemplate="<b>Country:</b> %{label}<br><b>Authors:</b> %{value}<extra></extra>"
+    )
+    return fig
+
+
+# --- Streamlit Main App Layout ---
+
+def main():
+    """Main function to run the Streamlit application."""
+    st.title("🔬 Academic Production & Scientometric Analysis Dashboard")
+    st.markdown("---")
+
+    # --- Sidebar for Inputs ---
+    with st.sidebar:
+        st.header("1. Data Input")
+        uploaded_file = st.file_uploader(
+            "Upload your dataset (CSV/TSV required columns: 'Author Full Name', 'Country')",
+            type=['csv', 'txt']
+        )
+        
+        st.header("2. Academic Rigor")
+        st.markdown(
+            "The KCDI (Collaboration Diversity Index) and KJI (Gender Justice Index) are calculated based on best-practice scientometric concentration and parity formulas."
+        )
+        
+    # --- Main Content ---
+    
+    if uploaded_file is None:
+        st.info("Awaiting file upload to begin analysis. Please upload a CSV/TSV file containing author data.")
+        return
+
+    # 1. Load Data
+    raw_df = load_data(uploaded_file)
+    if raw_df is None:
+        return # Exit if loading failed
+
+    # 2. Process Data
+    if guesser is None or cc is None:
+        st.error("External libraries failed to initialize.")
+        return
+        
+    processed_df = process_data(raw_df, guesser, cc)
+    
+    if processed_df.empty:
+        st.warning("Processed DataFrame is empty after loading.")
+        return
+
+    st.subheader(f"✅ Data Summary: {len(processed_df)} Records Loaded")
+    
+    # Show the first few rows of the processed data
+    with st.expander("Show Processed Data Sample"):
+        st.dataframe(processed_df.head(), use_container_width=True)
+        
+    st.markdown("---")
+    
+    # 3. Calculate and Display Indices (Rigor)
+    metrics = calculate_scientometric_indices(processed_df)
+    
+    st.header("📊 Scientometric Indices and Key Metrics")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric(
+            label="K-Index of Collaboration Diversity (KCDI)",
+            value=f"{metrics.get('KCDI', 'N/A'):.4f}",
+            help=metrics.get('KCDI_Description', 'Data missing for calculation.')
+        )
+    with col2:
+        st.metric(
+            label="K-Index of Gender Justice (KJI)",
+            value=f"{metrics.get('KJI', 'N/A'):.4f}",
+            help=metrics.get('KJI_Description', 'Data missing for calculation.')
+        )
+    with col3:
+        st.metric(
+            label="Authors Processed",
+            value=f"{len(processed_df):,}",
+            help="Total number of records successfully processed."
+        )
+        
+    st.markdown("---")
+        
+    # 4. Visualization (Publication-Ready)
+    st.header("📈 Publication-Ready Visualizations")
+
+    # Gender Distribution
+    if 'Inferred Gender' in processed_df.columns:
+        gender_fig = create_gender_bar_chart(processed_df)
+        st.plotly_chart(gender_fig, use_container_width=True)
+    else:
+        st.warning("Cannot visualize gender distribution: 'Author Full Name' column is missing or failed inference.")
+
+    st.markdown("---")
+
+    # Country Distribution
+    if 'Standard Country' in processed_df.columns:
+        country_fig = create_country_treemap(processed_df)
+        st.plotly_chart(country_fig, use_container_width=True)
+    else:
+        st.warning("Cannot visualize country distribution: 'Country' column is missing or failed standardization.")
+        
+    st.markdown("---")
+    
+    st.caption("Application powered by Streamlit, Pandas, and Plotly.")
+
+
+if __name__ == "__main__":import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from io import StringIO
+
+# IMPORT
+    main()
